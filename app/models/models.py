@@ -113,6 +113,9 @@ class Alert(Base):
     ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     acknowledged_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     acknowledged_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    silenced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    silenced_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    silenced_duration_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     metric: Mapped["Metric"] = relationship("Metric", back_populates="alerts")

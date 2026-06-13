@@ -86,10 +86,6 @@ async def detect_anomalies(
         raise HTTPException(status_code=404, detail="指标不存在")
     
     detection_service = DetectionService(session)
-    alerts = await detection_service.detect_anomalies(metric_id)
+    result = await detection_service.detect_anomalies(metric_id)
     
-    return {
-        "message": f"检测完成，发现 {len(alerts)} 个异常",
-        "alerts_count": len(alerts),
-        "alert_ids": [a.id for a in alerts],
-    }
+    return result

@@ -12,7 +12,7 @@ class ReviewBase(BaseModel):
 
 
 class ReviewCreate(ReviewBase):
-    alert_id: int
+    pass
 
 
 class ReviewUpdate(BaseModel):

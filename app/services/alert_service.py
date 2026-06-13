@@ -92,10 +92,28 @@ class AlertService:
             return None
 
         alert.status = AlertStatus.SILENCED
+        alert.silenced_at = datetime.utcnow()
+        alert.silenced_until = datetime.utcnow() + timedelta(minutes=duration_minutes)
+        alert.silenced_duration_minutes = duration_minutes
 
         await self.session.commit()
         await self.session.refresh(alert)
         return alert
+
+    async def is_alert_silenced(self, alert: Alert) -> bool:
+        if alert.status != AlertStatus.SILENCED:
+            return False
+        if alert.silenced_until and datetime.utcnow() > alert.silenced_until:
+            alert.status = AlertStatus.ACTIVE
+            alert.silenced_at = None
+            alert.silenced_until = None
+            await self.session.commit()
+            return False
+        return True
+
+    async def get_active_alerts_excluding_silenced(self, metric_id: int) -> List[Alert]:
+        alerts = await self.get_active_alerts_by_metric(metric_id)
+        return [a for a in alerts if not await self.is_alert_silenced(a)]
 
     async def get_active_alerts_by_metric(self, metric_id: int) -> List[Alert]:
         result = await self.session.execute(

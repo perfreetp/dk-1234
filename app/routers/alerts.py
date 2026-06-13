@@ -130,7 +130,7 @@ async def create_review(
     alert = await alert_service.get_alert_by_id(alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="告警不存在")
-    
+
     review_service = ReviewService(session)
     review = await review_service.create_review(
         alert_id=alert_id,
