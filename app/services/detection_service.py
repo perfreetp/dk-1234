@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Tuple
 from sqlalchemy import select, and_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models import Metric, MetricData, Rule, RuleType, Alert, AlertLevel, AlertStatus, MetricStatus
+from app.models import Metric, MetricData, Rule, RuleType, Alert, AlertLevel, AlertStatus, MetricStatus, TriggerSource, AlertLifecycleStage
 from app.schemas import RuleCreate, RuleUpdate
 
 
@@ -10,7 +10,12 @@ class DetectionService:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def detect_anomalies(self, metric_id: int, send_notifications: bool = False) -> dict:
+    async def detect_anomalies(
+        self,
+        metric_id: int,
+        send_notifications: bool = False,
+        trigger_source: TriggerSource = TriggerSource.API_DETECTION
+    ) -> dict:
         metric = await self._get_metric_with_rules(metric_id)
         if not metric or not metric.rules:
             return {
@@ -26,9 +31,11 @@ class DetectionService:
         resumed_alerts = []
         new_alerts = []
         notifications_sent = []
+        lifecycle_records = []
 
-        from app.services.notification_service import NotificationService
+        from app.services.notification_service import NotificationService, AlertLifecycleService
         notification_service = NotificationService(self.session)
+        lifecycle_service = AlertLifecycleService(self.session)
 
         for rule in metric.rules:
             if not rule.is_active:
@@ -52,6 +59,22 @@ class DetectionService:
                     await self.session.commit()
                     await self.session.refresh(active_alert)
                     
+                    lifecycle_record = await lifecycle_service.create_lifecycle_record(
+                        alert_id=active_alert.id,
+                        metric_id=metric_id,
+                        rule_id=rule.id,
+                        stage=AlertLifecycleStage.RESUMED_FROM_SILENCE,
+                        trigger_source=trigger_source,
+                        previous_status=AlertStatus.SILENCED.value,
+                        new_status=AlertStatus.ACTIVE.value,
+                        silenced_duration_minutes=original_silenced_duration,
+                        current_value=anomaly_result["current_value"] if anomaly_result else None,
+                        expected_value=anomaly_result["expected_value"] if anomaly_result else None,
+                        deviation=anomaly_result["deviation"] if anomaly_result else None,
+                        note=f"静默{original_silenced_duration}分钟到期，恢复检测",
+                    )
+                    lifecycle_records.append({"alert_id": active_alert.id, "lifecycle_id": lifecycle_record.id})
+                    
                     if anomaly_result:
                         active_alert.current_value = anomaly_result["current_value"]
                         active_alert.expected_value = anomaly_result["expected_value"]
@@ -61,7 +84,7 @@ class DetectionService:
                         alerts.append(active_alert)
                         resumed_alerts.append({
                             "alert_id": active_alert.id,
-                            "rule_name": next((r.name for r in metric.rules if r.id == active_alert.rule_id), None),
+                            "rule_name": rule.name,
                             "resumed_from_silence": True,
                             "original_silenced_duration_minutes": original_silenced_duration,
                             "original_silenced_at": original_silenced_at.isoformat() if original_silenced_at else None,
@@ -76,15 +99,29 @@ class DetectionService:
                         restored_alerts.append(active_alert)
                         resumed_alerts.append({
                             "alert_id": active_alert.id,
-                            "rule_name": next((r.name for r in metric.rules if r.id == active_alert.rule_id), None),
+                            "rule_name": rule.name,
                             "resumed_from_silence": True,
                             "original_silenced_duration_minutes": original_silenced_duration,
                             "original_silenced_at": original_silenced_at.isoformat() if original_silenced_at else None,
                             "original_silenced_until": original_silenced_until.isoformat() if original_silenced_until else None,
                             "status_after_resume": "resolved",
                         })
+                        lifecycle_record = await lifecycle_service.create_lifecycle_record(
+                            alert_id=active_alert.id,
+                            metric_id=metric_id,
+                            rule_id=rule.id,
+                            stage=AlertLifecycleStage.RECOVERED,
+                            trigger_source=trigger_source,
+                            previous_status=AlertStatus.ACTIVE.value,
+                            new_status=AlertStatus.RESOLVED.value,
+                            current_value=active_alert.current_value,
+                            expected_value=active_alert.expected_value,
+                            deviation=active_alert.deviation,
+                            note="静默到期后指标恢复正常",
+                        )
+                        lifecycle_records.append({"alert_id": active_alert.id, "lifecycle_id": lifecycle_record.id})
                         if send_notifications:
-                            notify_result = await notification_service.notify_recovery(active_alert)
+                            notify_result = await notification_service.notify_recovery(active_alert, trigger_source)
                             notifications_sent.extend(notify_result)
                 else:
                     remaining_minutes = 0
@@ -94,7 +131,7 @@ class DetectionService:
                     
                     silenced_alerts.append({
                         "alert_id": active_alert.id,
-                        "rule_name": next((r.name for r in metric.rules if r.id == active_alert.rule_id), None),
+                        "rule_name": rule.name,
                         "silenced_at": active_alert.silenced_at.isoformat() if active_alert.silenced_at else None,
                         "silenced_until": active_alert.silenced_until.isoformat() if active_alert.silenced_until else None,
                         "silenced_duration_minutes": active_alert.silenced_duration_minutes,
@@ -112,6 +149,21 @@ class DetectionService:
                     await self.session.commit()
                     await self.session.refresh(active_alert)
                     alerts.append(active_alert)
+                    
+                    lifecycle_record = await lifecycle_service.create_lifecycle_record(
+                        alert_id=active_alert.id,
+                        metric_id=metric_id,
+                        rule_id=rule.id,
+                        stage=AlertLifecycleStage.CONTINUOUS_ANOMALY,
+                        trigger_source=trigger_source,
+                        previous_status=AlertStatus.ACTIVE.value,
+                        new_status=AlertStatus.ACTIVE.value,
+                        current_value=anomaly_result["current_value"],
+                        expected_value=anomaly_result["expected_value"],
+                        deviation=anomaly_result["deviation"],
+                        note="持续异常，值更新",
+                    )
+                    lifecycle_records.append({"alert_id": active_alert.id, "lifecycle_id": lifecycle_record.id})
                 elif not active_alert:
                     alert = await self._create_or_update_alert(
                         metric_id=metric_id,
@@ -122,8 +174,23 @@ class DetectionService:
                     )
                     alerts.append(alert)
                     new_alerts.append(alert)
+                    
+                    lifecycle_record = await lifecycle_service.create_lifecycle_record(
+                        alert_id=alert.id,
+                        metric_id=metric_id,
+                        rule_id=rule.id,
+                        stage=AlertLifecycleStage.FIRST_ANOMALY,
+                        trigger_source=trigger_source,
+                        previous_status=None,
+                        new_status=AlertStatus.ACTIVE.value,
+                        current_value=anomaly_result["current_value"],
+                        expected_value=anomaly_result["expected_value"],
+                        deviation=anomaly_result["deviation"],
+                        note="首次检测到异常",
+                    )
+                    lifecycle_records.append({"alert_id": alert.id, "lifecycle_id": lifecycle_record.id})
                     if send_notifications:
-                        notify_result = await notification_service.notify_alert(alert)
+                        notify_result = await notification_service.notify_alert(alert, trigger_source)
                         notifications_sent.extend(notify_result)
             else:
                 if active_alert and active_alert.status == AlertStatus.ACTIVE:
@@ -132,8 +199,23 @@ class DetectionService:
                     await self.session.commit()
                     await self.session.refresh(active_alert)
                     restored_alerts.append(active_alert)
+                    
+                    lifecycle_record = await lifecycle_service.create_lifecycle_record(
+                        alert_id=active_alert.id,
+                        metric_id=metric_id,
+                        rule_id=rule.id,
+                        stage=AlertLifecycleStage.RECOVERED,
+                        trigger_source=trigger_source,
+                        previous_status=AlertStatus.ACTIVE.value,
+                        new_status=AlertStatus.RESOLVED.value,
+                        current_value=active_alert.current_value,
+                        expected_value=active_alert.expected_value,
+                        deviation=active_alert.deviation,
+                        note="指标恢复正常",
+                    )
+                    lifecycle_records.append({"alert_id": active_alert.id, "lifecycle_id": lifecycle_record.id})
                     if send_notifications:
-                        notify_result = await notification_service.notify_recovery(active_alert)
+                        notify_result = await notification_service.notify_recovery(active_alert, trigger_source)
                         notifications_sent.extend(notify_result)
 
         await self._update_metric_status(metric_id, alerts)
@@ -159,6 +241,7 @@ class DetectionService:
             "metric_id": metric_id,
             "metric_name": metric.name,
             "metric_code": metric.code,
+            "trigger_source": trigger_source.value,
             "status": worst_level if alerts else MetricStatus.NORMAL,
             "current_value": alerts[0].current_value if alerts else None,
             "alert_level": worst_level.value if alerts else None,
@@ -188,69 +271,9 @@ class DetectionService:
             "silenced_alerts": silenced_alerts,
             "resumed_alerts": resumed_alerts,
             "notifications_sent": notifications_sent,
+            "lifecycle_records_count": len(lifecycle_records),
             "related_metrics": related_metrics,
             "history_summary": history_summary,
-        }
-
-    async def _update_metric_status(self, metric_id: int, active_alerts: List[Alert]):
-        metric = await self.session.get(Metric, metric_id)
-        if not metric:
-            return
-
-        if not active_alerts:
-            metric.status = MetricStatus.NORMAL
-        else:
-            has_critical = any(a.level == AlertLevel.CRITICAL for a in active_alerts)
-            metric.status = MetricStatus.CRITICAL if has_critical else MetricStatus.WARNING
-
-        await self.session.commit()
-
-    async def _get_related_metrics(self, metric_id: int) -> List[dict]:
-        metric = await self.session.get(Metric, metric_id)
-        if not metric or not metric.related_metric_ids:
-            return []
-
-        result = await self.session.execute(
-            select(Metric).where(Metric.id.in_(metric.related_metric_ids))
-        )
-        related = list(result.scalars().all())
-        return [{
-            "id": m.id,
-            "name": m.name,
-            "code": m.code,
-            "status": m.status.value,
-            "business_line": m.business_line,
-        } for m in related]
-
-    async def _get_history_summary(self, metric_id: int) -> dict:
-        yesterday = datetime.utcnow() - timedelta(days=1)
-        data_points = await self._get_latest_data(metric_id, limit=100)
-
-        values = [dp.value for dp in data_points if dp.recorded_at >= yesterday]
-
-        if not values:
-            return {"count": 0, "min": None, "max": None, "avg": None, "trend": None}
-
-        min_val = min(values)
-        max_val = max(values)
-        avg_val = sum(values) / len(values)
-
-        if len(values) >= 2:
-            if values[0] > values[-1]:
-                trend = "up"
-            elif values[0] < values[-1]:
-                trend = "down"
-            else:
-                trend = "stable"
-        else:
-            trend = None
-
-        return {
-            "count": len(values),
-            "min": round(min_val, 2),
-            "max": round(max_val, 2),
-            "avg": round(avg_val, 2),
-            "trend": trend,
         }
 
     async def _get_metric_with_rules(self, metric_id: int) -> Optional[Metric]:
@@ -410,16 +433,6 @@ class DetectionService:
         expected_value: Optional[float],
         deviation: Optional[float],
     ) -> Alert:
-        existing_alert = await self._get_active_alert(metric_id, rule.id)
-        
-        if existing_alert:
-            existing_alert.current_value = current_value
-            existing_alert.expected_value = expected_value
-            existing_alert.deviation = deviation
-            await self.session.commit()
-            await self.session.refresh(existing_alert)
-            return existing_alert
-
         alert = Alert(
             metric_id=metric_id,
             rule_id=rule.id,
@@ -435,16 +448,6 @@ class DetectionService:
         await self.session.refresh(alert)
         return alert
 
-    async def _get_active_alert(self, metric_id: int, rule_id: int) -> Optional[Alert]:
-        result = await self.session.execute(
-            select(Alert).where(and_(
-                Alert.metric_id == metric_id,
-                Alert.rule_id == rule_id,
-                Alert.status == AlertStatus.ACTIVE
-            ))
-        )
-        return result.scalar_one_or_none()
-
     async def _get_active_or_silenced_alert(self, metric_id: int, rule_id: int) -> Optional[Alert]:
         result = await self.session.execute(
             select(Alert).where(and_(
@@ -454,6 +457,67 @@ class DetectionService:
             ))
         )
         return result.scalar_one_or_none()
+
+    async def _update_metric_status(self, metric_id: int, active_alerts: List[Alert]):
+        metric = await self.session.get(Metric, metric_id)
+        if not metric:
+            return
+
+        if not active_alerts:
+            metric.status = MetricStatus.NORMAL
+        else:
+            has_critical = any(a.level == AlertLevel.CRITICAL for a in active_alerts)
+            metric.status = MetricStatus.CRITICAL if has_critical else MetricStatus.WARNING
+
+        await self.session.commit()
+
+    async def _get_related_metrics(self, metric_id: int) -> List[dict]:
+        metric = await self.session.get(Metric, metric_id)
+        if not metric or not metric.related_metric_ids:
+            return []
+
+        result = await self.session.execute(
+            select(Metric).where(Metric.id.in_(metric.related_metric_ids))
+        )
+        related = list(result.scalars().all())
+        return [{
+            "id": m.id,
+            "name": m.name,
+            "code": m.code,
+            "status": m.status.value,
+            "business_line": m.business_line,
+        } for m in related]
+
+    async def _get_history_summary(self, metric_id: int) -> dict:
+        yesterday = datetime.utcnow() - timedelta(days=1)
+        data_points = await self._get_latest_data(metric_id, limit=100)
+
+        values = [dp.value for dp in data_points if dp.recorded_at >= yesterday]
+
+        if not values:
+            return {"count": 0, "min": None, "max": None, "avg": None, "trend": None}
+
+        min_val = min(values)
+        max_val = max(values)
+        avg_val = sum(values) / len(values)
+
+        if len(values) >= 2:
+            if values[0] > values[-1]:
+                trend = "up"
+            elif values[0] < values[-1]:
+                trend = "down"
+            else:
+                trend = "stable"
+        else:
+            trend = None
+
+        return {
+            "count": len(values),
+            "min": round(min_val, 2),
+            "max": round(max_val, 2),
+            "avg": round(avg_val, 2),
+            "trend": trend,
+        }
 
 
 class RuleService:

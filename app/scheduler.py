@@ -4,8 +4,8 @@ from apscheduler.triggers.cron import CronTrigger
 from datetime import datetime, timedelta
 from sqlalchemy import select
 from app.database import async_session
-from app.models import Metric
-from app.services import DetectionService, ReportService, NotificationService
+from app.models import Metric, TriggerSource
+from app.services import DetectionService, ReportService
 
 
 scheduler = AsyncIOScheduler()
@@ -20,10 +20,14 @@ async def detect_all_metrics():
         
         for metric in metrics:
             try:
-                result = await detection_service.detect_anomalies(metric.id, send_notifications=True)
-                print(f"检测指标 {metric.code}: 新告警 {result.get('new_alerts_count', 0)}, 恢复 {result.get('restored_alerts_count', 0)}, 通知发送 {result.get('notifications_sent_count', 0)}")
+                result = await detection_service.detect_anomalies(
+                    metric.id,
+                    send_notifications=True,
+                    trigger_source=TriggerSource.SCHEDULED_TASK
+                )
+                print(f"[定时任务] 检测指标 {metric.code}: 新告警 {result.get('new_alerts_count', 0)}, 恢复 {result.get('restored_alerts_count', 0)}, 通知发送 {result.get('notifications_sent_count', 0)}")
             except Exception as e:
-                print(f"检测指标 {metric.code} 时出错: {e}")
+                print(f"[定时任务] 检测指标 {metric.code} 时出错: {e}")
 
 
 async def generate_weekly_reports():

@@ -100,6 +100,38 @@ class AlertService:
         await self.session.refresh(alert)
         return alert
 
+    async def cancel_silence(self, alert_id: int) -> Optional[Alert]:
+        alert = await self.get_alert_by_id(alert_id)
+        if not alert or alert.status != AlertStatus.SILENCED:
+            return None
+
+        alert.status = AlertStatus.ACTIVE
+        alert.silenced_at = None
+        alert.silenced_until = None
+        original_duration = alert.silenced_duration_minutes
+        alert.silenced_duration_minutes = None
+
+        await self.session.commit()
+        await self.session.refresh(alert)
+        return alert
+
+    async def extend_silence(self, alert_id: int, additional_minutes: int) -> Optional[Alert]:
+        alert = await self.get_alert_by_id(alert_id)
+        if not alert or alert.status != AlertStatus.SILENCED:
+            return None
+
+        if alert.silenced_until:
+            new_until = alert.silenced_until + timedelta(minutes=additional_minutes)
+        else:
+            new_until = datetime.utcnow() + timedelta(minutes=additional_minutes)
+
+        alert.silenced_until = new_until
+        alert.silenced_duration_minutes = (alert.silenced_duration_minutes or 0) + additional_minutes
+
+        await self.session.commit()
+        await self.session.refresh(alert)
+        return alert
+
     async def is_alert_silenced(self, alert: Alert) -> bool:
         if alert.status != AlertStatus.SILENCED:
             return False

@@ -178,6 +178,12 @@ class NotificationType(str, enum.Enum):
     ACKNOWLEDGE = "acknowledge"
 
 
+class TriggerSource(str, enum.Enum):
+    API_DETECTION = "api_detection"
+    SCHEDULED_TASK = "scheduled_task"
+    MANUAL_ACTION = "manual_action"
+
+
 class NotificationRecord(Base):
     __tablename__ = "notification_records"
 
@@ -185,8 +191,37 @@ class NotificationRecord(Base):
     alert_id: Mapped[int] = mapped_column(Integer, ForeignKey("alerts.id"), nullable=False, index=True)
     metric_id: Mapped[int] = mapped_column(Integer, ForeignKey("metrics.id"), nullable=False, index=True)
     notification_type: Mapped[NotificationType] = mapped_column(SQLEnum(NotificationType), nullable=False)
+    trigger_source: Mapped[TriggerSource] = mapped_column(SQLEnum(TriggerSource), nullable=False)
     subscriber: Mapped[str] = mapped_column(String(100), nullable=False)
     subscriber_email: Mapped[str] = mapped_column(String(100), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="sent")
     sent_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class AlertLifecycleStage(str, enum.Enum):
+    FIRST_ANOMALY = "first_anomaly"
+    CONTINUOUS_ANOMALY = "continuous_anomaly"
+    SILENCED = "silenced"
+    RESUMED_FROM_SILENCE = "resumed_from_silence"
+    RECOVERED = "recovered"
+    ACKNOWLEDGED = "acknowledged"
+
+
+class AlertLifecycle(Base):
+    __tablename__ = "alert_lifecycle"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    alert_id: Mapped[int] = mapped_column(Integer, ForeignKey("alerts.id"), nullable=False, index=True)
+    metric_id: Mapped[int] = mapped_column(Integer, ForeignKey("metrics.id"), nullable=False, index=True)
+    rule_id: Mapped[int] = mapped_column(Integer, ForeignKey("rules.id"), nullable=False)
+    stage: Mapped[AlertLifecycleStage] = mapped_column(SQLEnum(AlertLifecycleStage), nullable=False)
+    trigger_source: Mapped[TriggerSource] = mapped_column(SQLEnum(TriggerSource), nullable=False)
+    previous_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    new_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    silenced_duration_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    current_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    expected_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    deviation: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

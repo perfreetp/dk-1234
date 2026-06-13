@@ -86,7 +86,12 @@ async def detect_anomalies(
     if not metric:
         raise HTTPException(status_code=404, detail="指标不存在")
     
+    from app.models import TriggerSource
     detection_service = DetectionService(session)
-    result = await detection_service.detect_anomalies(metric_id, send_notifications=send_notifications)
+    result = await detection_service.detect_anomalies(
+        metric_id,
+        send_notifications=send_notifications,
+        trigger_source=TriggerSource.API_DETECTION
+    )
     
     return result

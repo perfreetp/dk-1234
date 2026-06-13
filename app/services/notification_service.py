@@ -1,9 +1,13 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 from sqlalchemy import select, and_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
-from app.models import Subscription, Alert, AlertStatus, Metric, NotificationRecord, NotificationType
+from app.models import (
+    Subscription, Alert, AlertStatus, Metric,
+    NotificationRecord, NotificationType, TriggerSource,
+    AlertLifecycle, AlertLifecycleStage
+)
 import asyncio
 
 settings = get_settings()
@@ -22,7 +26,7 @@ class NotificationService:
         )
         return list(result.scalars().all())
 
-    async def notify_alert(self, alert: Alert) -> List[dict]:
+    async def notify_alert(self, alert: Alert, trigger_source: TriggerSource = TriggerSource.API_DETECTION) -> List[dict]:
         subscribers = await self.get_subscribers(alert.metric_id)
         notifications = []
 
@@ -44,6 +48,7 @@ class NotificationService:
                     alert_id=alert.id,
                     metric_id=alert.metric_id,
                     notification_type=NotificationType.ALERT,
+                    trigger_source=trigger_source,
                     subscriber=sub.subscriber,
                     subscriber_email=sub.subscriber_email,
                     status="sent" if notification else "failed",
@@ -55,19 +60,32 @@ class NotificationService:
                     "status": "sent",
                     "sent_at": record.sent_at.isoformat(),
                     "type": "alert",
+                    "trigger_source": trigger_source.value,
                 })
             except Exception as e:
+                record = await self._create_notification_record(
+                    alert_id=alert.id,
+                    metric_id=alert.metric_id,
+                    notification_type=NotificationType.ALERT,
+                    trigger_source=trigger_source,
+                    subscriber=sub.subscriber,
+                    subscriber_email=sub.subscriber_email,
+                    status="failed",
+                    error_message=str(e),
+                )
                 notifications.append({
+                    "notification_id": record.id,
                     "subscriber": sub.subscriber,
                     "email": sub.subscriber_email,
                     "status": "failed",
                     "error": str(e),
                     "type": "alert",
+                    "trigger_source": trigger_source.value,
                 })
 
         return notifications
 
-    async def notify_recovery(self, alert: Alert) -> List[dict]:
+    async def notify_recovery(self, alert: Alert, trigger_source: TriggerSource = TriggerSource.API_DETECTION) -> List[dict]:
         subscribers = await self.get_subscribers(alert.metric_id)
         notifications = []
 
@@ -89,6 +107,7 @@ class NotificationService:
                     alert_id=alert.id,
                     metric_id=alert.metric_id,
                     notification_type=NotificationType.RECOVERY,
+                    trigger_source=trigger_source,
                     subscriber=sub.subscriber,
                     subscriber_email=sub.subscriber_email,
                     status="sent" if notification else "failed",
@@ -100,19 +119,32 @@ class NotificationService:
                     "status": "sent",
                     "sent_at": record.sent_at.isoformat(),
                     "type": "recovery",
+                    "trigger_source": trigger_source.value,
                 })
             except Exception as e:
+                record = await self._create_notification_record(
+                    alert_id=alert.id,
+                    metric_id=alert.metric_id,
+                    notification_type=NotificationType.RECOVERY,
+                    trigger_source=trigger_source,
+                    subscriber=sub.subscriber,
+                    subscriber_email=sub.subscriber_email,
+                    status="failed",
+                    error_message=str(e),
+                )
                 notifications.append({
+                    "notification_id": record.id,
                     "subscriber": sub.subscriber,
                     "email": sub.subscriber_email,
                     "status": "failed",
                     "error": str(e),
                     "type": "recovery",
+                    "trigger_source": trigger_source.value,
                 })
 
         return notifications
 
-    async def notify_acknowledge(self, alert: Alert) -> List[dict]:
+    async def notify_acknowledge(self, alert: Alert, trigger_source: TriggerSource = TriggerSource.MANUAL_ACTION) -> List[dict]:
         subscribers = await self.get_subscribers(alert.metric_id)
         notifications = []
 
@@ -131,6 +163,7 @@ class NotificationService:
                     alert_id=alert.id,
                     metric_id=alert.metric_id,
                     notification_type=NotificationType.ACKNOWLEDGE,
+                    trigger_source=trigger_source,
                     subscriber=sub.subscriber,
                     subscriber_email=sub.subscriber_email,
                     status="sent" if notification else "failed",
@@ -142,14 +175,27 @@ class NotificationService:
                     "status": "sent",
                     "sent_at": record.sent_at.isoformat(),
                     "type": "acknowledge",
+                    "trigger_source": trigger_source.value,
                 })
             except Exception as e:
+                record = await self._create_notification_record(
+                    alert_id=alert.id,
+                    metric_id=alert.metric_id,
+                    notification_type=NotificationType.ACKNOWLEDGE,
+                    trigger_source=trigger_source,
+                    subscriber=sub.subscriber,
+                    subscriber_email=sub.subscriber_email,
+                    status="failed",
+                    error_message=str(e),
+                )
                 notifications.append({
+                    "notification_id": record.id,
                     "subscriber": sub.subscriber,
                     "email": sub.subscriber_email,
                     "status": "failed",
                     "error": str(e),
                     "type": "acknowledge",
+                    "trigger_source": trigger_source.value,
                 })
 
         return notifications
@@ -159,6 +205,7 @@ class NotificationService:
         alert_id: int,
         metric_id: int,
         notification_type: NotificationType,
+        trigger_source: TriggerSource,
         subscriber: str,
         subscriber_email: str,
         status: str,
@@ -168,6 +215,7 @@ class NotificationService:
             alert_id=alert_id,
             metric_id=metric_id,
             notification_type=notification_type,
+            trigger_source=trigger_source,
             subscriber=subscriber,
             subscriber_email=subscriber_email,
             status=status,
@@ -183,6 +231,7 @@ class NotificationService:
         alert_id: Optional[int] = None,
         metric_id: Optional[int] = None,
         notification_type: Optional[NotificationType] = None,
+        trigger_source: Optional[TriggerSource] = None,
         limit: int = 100,
     ) -> List[NotificationRecord]:
         query = select(NotificationRecord)
@@ -193,103 +242,69 @@ class NotificationService:
             conditions.append(NotificationRecord.metric_id == metric_id)
         if notification_type:
             conditions.append(NotificationRecord.notification_type == notification_type)
+        if trigger_source:
+            conditions.append(NotificationRecord.trigger_source == trigger_source)
         if conditions:
             query = query.where(and_(*conditions))
         query = query.order_by(desc(NotificationRecord.sent_at)).limit(limit)
         result = await self.session.execute(query)
         return list(result.scalars().all())
 
-    def _is_in_silent_hours(self, subscription: Subscription) -> bool:
-        if subscription.silent_hours_start is None or subscription.silent_hours_end is None:
-            return False
 
-        current_hour = datetime.utcnow().hour
-        start = subscription.silent_hours_start
-        end = subscription.silent_hours_end
+class AlertLifecycleService:
+    def __init__(self, session: AsyncSession):
+        self.session = session
 
-        if start <= end:
-            return start <= current_hour < end
-        else:
-            return current_hour >= start or current_hour < end
-
-    async def _send_notification(
+    async def create_lifecycle_record(
         self,
-        email: str,
-        subject: str,
-        content: str,
-        notification_type: str,
-    ) -> bool:
-        if settings.NOTIFICATION_EMAIL_ENABLED:
-            return await self._send_email(email, subject, content)
-        
-        if settings.NOTIFICATION_WEBHOOK_ENABLED:
-            return await self._send_webhook(email, subject, content, notification_type)
+        alert_id: int,
+        metric_id: int,
+        rule_id: int,
+        stage: AlertLifecycleStage,
+        trigger_source: TriggerSource,
+        previous_status: Optional[str],
+        new_status: str,
+        silenced_duration_minutes: Optional[int] = None,
+        current_value: Optional[float] = None,
+        expected_value: Optional[float] = None,
+        deviation: Optional[float] = None,
+        note: Optional[str] = None,
+    ) -> AlertLifecycle:
+        record = AlertLifecycle(
+            alert_id=alert_id,
+            metric_id=metric_id,
+            rule_id=rule_id,
+            stage=stage,
+            trigger_source=trigger_source,
+            previous_status=previous_status,
+            new_status=new_status,
+            silenced_duration_minutes=silenced_duration_minutes,
+            current_value=current_value,
+            expected_value=expected_value,
+            deviation=deviation,
+            note=note,
+        )
+        self.session.add(record)
+        await self.session.commit()
+        await self.session.refresh(record)
+        return record
 
-        return True
+    async def get_lifecycle_by_alert(self, alert_id: int) -> List[AlertLifecycle]:
+        result = await self.session.execute(
+            select(AlertLifecycle)
+            .where(AlertLifecycle.alert_id == alert_id)
+            .order_by(AlertLifecycle.created_at)
+        )
+        return list(result.scalars().all())
 
-    async def _send_email(self, to_email: str, subject: str, content: str) -> bool:
-        return True
-
-    async def _send_webhook(
-        self,
-        email: str,
-        subject: str,
-        content: str,
-        notification_type: str,
-    ) -> bool:
-        return True
-
-    def _format_alert_message(self, alert: Alert) -> str:
-        metric_name = alert.metric.name if alert.metric else "Unknown"
-        metric_code = alert.metric.code if alert.metric else "Unknown"
-        business_line = alert.metric.business_line if alert.metric else "Unknown"
-
-        return f"""
-指标告警通知
-
-告警级别: {alert.level.value.upper()}
-指标名称: {metric_name}
-指标编码: {metric_code}
-业务线: {business_line}
-
-当前值: {alert.current_value}
-预期值: {alert.expected_value or 'N/A'}
-偏差: {alert.deviation or 'N/A'}
-
-开始时间: {alert.started_at.strftime('%Y-%m-%d %H:%M:%S')}
-
-请及时处理。
-        """.strip()
-
-    def _format_recovery_message(self, alert: Alert) -> str:
-        metric_name = alert.metric.name if alert.metric else "Unknown"
-
-        return f"""
-指标恢复通知
-
-指标名称: {metric_name}
-告警级别: {alert.level.value.upper()}
-
-开始时间: {alert.started_at.strftime('%Y-%m-%d %H:%M:%S')}
-恢复时间: {alert.ended_at.strftime('%Y-%m-%d %H:%M:%S') if alert.ended_at else 'N/A'}
-
-指标已恢复正常。
-        """.strip()
-
-    def _format_acknowledge_message(self, alert: Alert) -> str:
-        metric_name = alert.metric.name if alert.metric else "Unknown"
-
-        return f"""
-告警确认通知
-
-指标名称: {metric_name}
-告警级别: {alert.level.value.upper()}
-
-确认人: {alert.acknowledged_by or 'Unknown'}
-确认时间: {alert.acknowledged_at.strftime('%Y-%m-%d %H:%M:%S') if alert.acknowledged_at else 'N/A'}
-
-告警已被确认，正在处理中。
-        """.strip()
+    async def get_lifecycle_by_metric(self, metric_id: int, limit: int = 100) -> List[AlertLifecycle]:
+        result = await self.session.execute(
+            select(AlertLifecycle)
+            .where(AlertLifecycle.metric_id == metric_id)
+            .order_by(desc(AlertLifecycle.created_at))
+            .limit(limit)
+        )
+        return list(result.scalars().all())
 
 
 class SubscriptionService:
