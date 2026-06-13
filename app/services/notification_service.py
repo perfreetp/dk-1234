@@ -1,9 +1,9 @@
 from datetime import datetime
 from typing import List, Optional
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
-from app.models import Subscription, Alert, AlertStatus, Metric
+from app.models import Subscription, Alert, AlertStatus, Metric, NotificationRecord, NotificationType
 import asyncio
 
 settings = get_settings()
@@ -33,17 +33,37 @@ class NotificationService:
             if self._is_in_silent_hours(sub):
                 continue
 
-            notification = await self._send_notification(
-                email=sub.subscriber_email,
-                subject=f"[{alert.level.value.upper()}] 指标告警: {alert.metric.name if alert.metric else 'Unknown'}",
-                content=self._format_alert_message(alert),
-                notification_type="alert",
-            )
-            notifications.append({
-                "subscriber": sub.subscriber,
-                "email": sub.subscriber_email,
-                "status": "sent" if notification else "failed",
-            })
+            try:
+                notification = await self._send_notification(
+                    email=sub.subscriber_email,
+                    subject=f"[{alert.level.value.upper()}] 指标告警: {alert.metric.name if alert.metric else 'Unknown'}",
+                    content=self._format_alert_message(alert),
+                    notification_type="alert",
+                )
+                record = await self._create_notification_record(
+                    alert_id=alert.id,
+                    metric_id=alert.metric_id,
+                    notification_type=NotificationType.ALERT,
+                    subscriber=sub.subscriber,
+                    subscriber_email=sub.subscriber_email,
+                    status="sent" if notification else "failed",
+                )
+                notifications.append({
+                    "notification_id": record.id,
+                    "subscriber": sub.subscriber,
+                    "email": sub.subscriber_email,
+                    "status": "sent",
+                    "sent_at": record.sent_at.isoformat(),
+                    "type": "alert",
+                })
+            except Exception as e:
+                notifications.append({
+                    "subscriber": sub.subscriber,
+                    "email": sub.subscriber_email,
+                    "status": "failed",
+                    "error": str(e),
+                    "type": "alert",
+                })
 
         return notifications
 
@@ -58,17 +78,37 @@ class NotificationService:
             if self._is_in_silent_hours(sub):
                 continue
 
-            notification = await self._send_notification(
-                email=sub.subscriber_email,
-                subject=f"[RECOVERED] 指标恢复: {alert.metric.name if alert.metric else 'Unknown'}",
-                content=self._format_recovery_message(alert),
-                notification_type="recovery",
-            )
-            notifications.append({
-                "subscriber": sub.subscriber,
-                "email": sub.subscriber_email,
-                "status": "sent" if notification else "failed",
-            })
+            try:
+                notification = await self._send_notification(
+                    email=sub.subscriber_email,
+                    subject=f"[RECOVERED] 指标恢复: {alert.metric.name if alert.metric else 'Unknown'}",
+                    content=self._format_recovery_message(alert),
+                    notification_type="recovery",
+                )
+                record = await self._create_notification_record(
+                    alert_id=alert.id,
+                    metric_id=alert.metric_id,
+                    notification_type=NotificationType.RECOVERY,
+                    subscriber=sub.subscriber,
+                    subscriber_email=sub.subscriber_email,
+                    status="sent" if notification else "failed",
+                )
+                notifications.append({
+                    "notification_id": record.id,
+                    "subscriber": sub.subscriber,
+                    "email": sub.subscriber_email,
+                    "status": "sent",
+                    "sent_at": record.sent_at.isoformat(),
+                    "type": "recovery",
+                })
+            except Exception as e:
+                notifications.append({
+                    "subscriber": sub.subscriber,
+                    "email": sub.subscriber_email,
+                    "status": "failed",
+                    "error": str(e),
+                    "type": "recovery",
+                })
 
         return notifications
 
@@ -80,19 +120,84 @@ class NotificationService:
             if not sub.notify_on_acknowledge:
                 continue
 
-            notification = await self._send_notification(
-                email=sub.subscriber_email,
-                subject=f"[ACKNOWLEDGED] 告警已确认: {alert.metric.name if alert.metric else 'Unknown'}",
-                content=self._format_acknowledge_message(alert),
-                notification_type="acknowledge",
-            )
-            notifications.append({
-                "subscriber": sub.subscriber,
-                "email": sub.subscriber_email,
-                "status": "sent" if notification else "failed",
-            })
+            try:
+                notification = await self._send_notification(
+                    email=sub.subscriber_email,
+                    subject=f"[ACKNOWLEDGED] 告警已确认: {alert.metric.name if alert.metric else 'Unknown'}",
+                    content=self._format_acknowledge_message(alert),
+                    notification_type="acknowledge",
+                )
+                record = await self._create_notification_record(
+                    alert_id=alert.id,
+                    metric_id=alert.metric_id,
+                    notification_type=NotificationType.ACKNOWLEDGE,
+                    subscriber=sub.subscriber,
+                    subscriber_email=sub.subscriber_email,
+                    status="sent" if notification else "failed",
+                )
+                notifications.append({
+                    "notification_id": record.id,
+                    "subscriber": sub.subscriber,
+                    "email": sub.subscriber_email,
+                    "status": "sent",
+                    "sent_at": record.sent_at.isoformat(),
+                    "type": "acknowledge",
+                })
+            except Exception as e:
+                notifications.append({
+                    "subscriber": sub.subscriber,
+                    "email": sub.subscriber_email,
+                    "status": "failed",
+                    "error": str(e),
+                    "type": "acknowledge",
+                })
 
         return notifications
+
+    async def _create_notification_record(
+        self,
+        alert_id: int,
+        metric_id: int,
+        notification_type: NotificationType,
+        subscriber: str,
+        subscriber_email: str,
+        status: str,
+        error_message: Optional[str] = None,
+    ) -> NotificationRecord:
+        record = NotificationRecord(
+            alert_id=alert_id,
+            metric_id=metric_id,
+            notification_type=notification_type,
+            subscriber=subscriber,
+            subscriber_email=subscriber_email,
+            status=status,
+            error_message=error_message,
+        )
+        self.session.add(record)
+        await self.session.commit()
+        await self.session.refresh(record)
+        return record
+
+    async def get_notification_records(
+        self,
+        alert_id: Optional[int] = None,
+        metric_id: Optional[int] = None,
+        notification_type: Optional[NotificationType] = None,
+        limit: int = 100,
+    ) -> List[NotificationRecord]:
+        query = select(NotificationRecord)
+        conditions = []
+        if alert_id:
+            conditions.append(NotificationRecord.alert_id == alert_id)
+        if metric_id:
+            conditions.append(NotificationRecord.metric_id == metric_id)
+        if notification_type:
+            conditions.append(NotificationRecord.notification_type == notification_type)
+        if conditions:
+            query = query.where(and_(*conditions))
+        query = query.order_by(desc(NotificationRecord.sent_at)).limit(limit)
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
 
     def _is_in_silent_hours(self, subscription: Subscription) -> bool:
         if subscription.silent_hours_start is None or subscription.silent_hours_end is None:

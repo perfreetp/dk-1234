@@ -3,6 +3,7 @@ from app.routers.rules import router as rules_router
 from app.routers.alerts import router as alerts_router
 from app.routers.subscriptions import router as subscriptions_router
 from app.routers.reports import router as reports_router
+from app.routers.notifications import router as notifications_router
 
 __all__ = [
     "metrics_router",
@@ -10,4 +11,5 @@ __all__ = [
     "alerts_router",
     "subscriptions_router",
     "reports_router",
+    "notifications_router",
 ]

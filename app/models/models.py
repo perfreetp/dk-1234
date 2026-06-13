@@ -170,3 +170,23 @@ class WeeklyReport(Base):
     avg_resolution_time: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class NotificationType(str, enum.Enum):
+    ALERT = "alert"
+    RECOVERY = "recovery"
+    ACKNOWLEDGE = "acknowledge"
+
+
+class NotificationRecord(Base):
+    __tablename__ = "notification_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    alert_id: Mapped[int] = mapped_column(Integer, ForeignKey("alerts.id"), nullable=False, index=True)
+    metric_id: Mapped[int] = mapped_column(Integer, ForeignKey("metrics.id"), nullable=False, index=True)
+    notification_type: Mapped[NotificationType] = mapped_column(SQLEnum(NotificationType), nullable=False)
+    subscriber: Mapped[str] = mapped_column(String(100), nullable=False)
+    subscriber_email: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="sent")
+    sent_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

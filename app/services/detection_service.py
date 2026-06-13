@@ -23,6 +23,7 @@ class DetectionService:
         alerts = []
         restored_alerts = []
         silenced_alerts = []
+        resumed_alerts = []
         new_alerts = []
         notifications_sent = []
 
@@ -37,12 +38,20 @@ class DetectionService:
             active_alert = await self._get_active_or_silenced_alert(metric_id, rule.id)
 
             if active_alert and active_alert.status == AlertStatus.SILENCED:
-                if active_alert.silenced_until and datetime.utcnow() > active_alert.silenced_until:
+                is_expired = active_alert.silenced_until and datetime.utcnow() > active_alert.silenced_until
+                
+                if is_expired:
+                    original_silenced_duration = active_alert.silenced_duration_minutes
+                    original_silenced_at = active_alert.silenced_at
+                    original_silenced_until = active_alert.silenced_until
+                    
                     active_alert.status = AlertStatus.ACTIVE
                     active_alert.silenced_at = None
                     active_alert.silenced_until = None
+                    active_alert.silenced_duration_minutes = None
                     await self.session.commit()
                     await self.session.refresh(active_alert)
+                    
                     if anomaly_result:
                         active_alert.current_value = anomaly_result["current_value"]
                         active_alert.expected_value = anomaly_result["expected_value"]
@@ -50,22 +59,48 @@ class DetectionService:
                         await self.session.commit()
                         await self.session.refresh(active_alert)
                         alerts.append(active_alert)
+                        resumed_alerts.append({
+                            "alert_id": active_alert.id,
+                            "rule_name": next((r.name for r in metric.rules if r.id == active_alert.rule_id), None),
+                            "resumed_from_silence": True,
+                            "original_silenced_duration_minutes": original_silenced_duration,
+                            "original_silenced_at": original_silenced_at.isoformat() if original_silenced_at else None,
+                            "original_silenced_until": original_silenced_until.isoformat() if original_silenced_until else None,
+                            "status_after_resume": "still_anomaly",
+                        })
                     else:
                         active_alert.status = AlertStatus.RESOLVED
                         active_alert.ended_at = datetime.utcnow()
                         await self.session.commit()
                         await self.session.refresh(active_alert)
                         restored_alerts.append(active_alert)
+                        resumed_alerts.append({
+                            "alert_id": active_alert.id,
+                            "rule_name": next((r.name for r in metric.rules if r.id == active_alert.rule_id), None),
+                            "resumed_from_silence": True,
+                            "original_silenced_duration_minutes": original_silenced_duration,
+                            "original_silenced_at": original_silenced_at.isoformat() if original_silenced_at else None,
+                            "original_silenced_until": original_silenced_until.isoformat() if original_silenced_until else None,
+                            "status_after_resume": "resolved",
+                        })
                         if send_notifications:
                             notify_result = await notification_service.notify_recovery(active_alert)
                             notifications_sent.extend(notify_result)
                 else:
+                    remaining_minutes = 0
+                    if active_alert.silenced_until:
+                        remaining_seconds = (active_alert.silenced_until - datetime.utcnow()).total_seconds()
+                        remaining_minutes = max(0, int(remaining_seconds / 60))
+                    
                     silenced_alerts.append({
                         "alert_id": active_alert.id,
                         "rule_name": next((r.name for r in metric.rules if r.id == active_alert.rule_id), None),
                         "silenced_at": active_alert.silenced_at.isoformat() if active_alert.silenced_at else None,
                         "silenced_until": active_alert.silenced_until.isoformat() if active_alert.silenced_until else None,
                         "silenced_duration_minutes": active_alert.silenced_duration_minutes,
+                        "remaining_minutes": remaining_minutes,
+                        "status": "silenced",
+                        "action": "skipped",
                     })
                     continue
 
@@ -131,6 +166,7 @@ class DetectionService:
             "active_alerts_count": len(alerts),
             "restored_alerts_count": len(restored_alerts),
             "silenced_alerts_count": len(silenced_alerts),
+            "resumed_from_silence_count": len(resumed_alerts),
             "new_alerts_count": len(new_alerts),
             "notifications_sent_count": len(notifications_sent),
             "alerts": [{
@@ -150,6 +186,7 @@ class DetectionService:
                 "ended_at": a.ended_at.isoformat() if a.ended_at else None,
             } for a in restored_alerts],
             "silenced_alerts": silenced_alerts,
+            "resumed_alerts": resumed_alerts,
             "notifications_sent": notifications_sent,
             "related_metrics": related_metrics,
             "history_summary": history_summary,

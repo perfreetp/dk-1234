@@ -10,6 +10,7 @@ from app.routers import (
     alerts_router,
     subscriptions_router,
     reports_router,
+    notifications_router,
 )
 
 settings = get_settings()
@@ -73,6 +74,7 @@ app.include_router(rules_router, prefix="/api/v1")
 app.include_router(alerts_router, prefix="/api/v1")
 app.include_router(subscriptions_router, prefix="/api/v1")
 app.include_router(reports_router, prefix="/api/v1")
+app.include_router(notifications_router, prefix="/api/v1")
 
 
 @app.get("/")
