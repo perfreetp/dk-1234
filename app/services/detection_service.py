@@ -10,7 +10,7 @@ class DetectionService:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def detect_anomalies(self, metric_id: int) -> dict:
+    async def detect_anomalies(self, metric_id: int, send_notifications: bool = False) -> dict:
         metric = await self._get_metric_with_rules(metric_id)
         if not metric or not metric.rules:
             return {
@@ -23,13 +23,18 @@ class DetectionService:
         alerts = []
         restored_alerts = []
         silenced_alerts = []
+        new_alerts = []
+        notifications_sent = []
+
+        from app.services.notification_service import NotificationService
+        notification_service = NotificationService(self.session)
 
         for rule in metric.rules:
             if not rule.is_active:
                 continue
 
             anomaly_result = await self._check_rule(metric_id, rule)
-            active_alert = await self._get_active_alert(metric_id, rule.id)
+            active_alert = await self._get_active_or_silenced_alert(metric_id, rule.id)
 
             if active_alert and active_alert.status == AlertStatus.SILENCED:
                 if active_alert.silenced_until and datetime.utcnow() > active_alert.silenced_until:
@@ -37,24 +42,42 @@ class DetectionService:
                     active_alert.silenced_at = None
                     active_alert.silenced_until = None
                     await self.session.commit()
+                    await self.session.refresh(active_alert)
+                    if anomaly_result:
+                        active_alert.current_value = anomaly_result["current_value"]
+                        active_alert.expected_value = anomaly_result["expected_value"]
+                        active_alert.deviation = anomaly_result["deviation"]
+                        await self.session.commit()
+                        await self.session.refresh(active_alert)
+                        alerts.append(active_alert)
+                    else:
+                        active_alert.status = AlertStatus.RESOLVED
+                        active_alert.ended_at = datetime.utcnow()
+                        await self.session.commit()
+                        await self.session.refresh(active_alert)
+                        restored_alerts.append(active_alert)
+                        if send_notifications:
+                            notify_result = await notification_service.notify_recovery(active_alert)
+                            notifications_sent.extend(notify_result)
                 else:
                     silenced_alerts.append({
                         "alert_id": active_alert.id,
                         "rule_name": next((r.name for r in metric.rules if r.id == active_alert.rule_id), None),
+                        "silenced_at": active_alert.silenced_at.isoformat() if active_alert.silenced_at else None,
                         "silenced_until": active_alert.silenced_until.isoformat() if active_alert.silenced_until else None,
                         "silenced_duration_minutes": active_alert.silenced_duration_minutes,
                     })
                     continue
 
             if anomaly_result:
-                if active_alert:
+                if active_alert and active_alert.status == AlertStatus.ACTIVE:
                     active_alert.current_value = anomaly_result["current_value"]
                     active_alert.expected_value = anomaly_result["expected_value"]
                     active_alert.deviation = anomaly_result["deviation"]
                     await self.session.commit()
                     await self.session.refresh(active_alert)
                     alerts.append(active_alert)
-                else:
+                elif not active_alert:
                     alert = await self._create_or_update_alert(
                         metric_id=metric_id,
                         rule=rule,
@@ -63,6 +86,10 @@ class DetectionService:
                         deviation=anomaly_result["deviation"],
                     )
                     alerts.append(alert)
+                    new_alerts.append(alert)
+                    if send_notifications:
+                        notify_result = await notification_service.notify_alert(alert)
+                        notifications_sent.extend(notify_result)
             else:
                 if active_alert and active_alert.status == AlertStatus.ACTIVE:
                     active_alert.status = AlertStatus.RESOLVED
@@ -70,6 +97,9 @@ class DetectionService:
                     await self.session.commit()
                     await self.session.refresh(active_alert)
                     restored_alerts.append(active_alert)
+                    if send_notifications:
+                        notify_result = await notification_service.notify_recovery(active_alert)
+                        notifications_sent.extend(notify_result)
 
         await self._update_metric_status(metric_id, alerts)
 
@@ -101,6 +131,8 @@ class DetectionService:
             "active_alerts_count": len(alerts),
             "restored_alerts_count": len(restored_alerts),
             "silenced_alerts_count": len(silenced_alerts),
+            "new_alerts_count": len(new_alerts),
+            "notifications_sent_count": len(notifications_sent),
             "alerts": [{
                 "alert_id": a.id,
                 "rule_id": a.rule_id,
@@ -118,6 +150,7 @@ class DetectionService:
                 "ended_at": a.ended_at.isoformat() if a.ended_at else None,
             } for a in restored_alerts],
             "silenced_alerts": silenced_alerts,
+            "notifications_sent": notifications_sent,
             "related_metrics": related_metrics,
             "history_summary": history_summary,
         }
@@ -371,6 +404,16 @@ class DetectionService:
                 Alert.metric_id == metric_id,
                 Alert.rule_id == rule_id,
                 Alert.status == AlertStatus.ACTIVE
+            ))
+        )
+        return result.scalar_one_or_none()
+
+    async def _get_active_or_silenced_alert(self, metric_id: int, rule_id: int) -> Optional[Alert]:
+        result = await self.session.execute(
+            select(Alert).where(and_(
+                Alert.metric_id == metric_id,
+                Alert.rule_id == rule_id,
+                Alert.status.in_([AlertStatus.ACTIVE, AlertStatus.SILENCED])
             ))
         )
         return result.scalar_one_or_none()

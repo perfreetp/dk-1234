@@ -20,6 +20,9 @@ class AlertResponse(AlertBase):
     ended_at: Optional[datetime] = None
     acknowledged_at: Optional[datetime] = None
     acknowledged_by: Optional[str] = None
+    silenced_at: Optional[datetime] = None
+    silenced_until: Optional[datetime] = None
+    silenced_duration_minutes: Optional[int] = None
     created_at: datetime
 
     class Config:

@@ -78,6 +78,7 @@ async def delete_rule(
 @router.post("/detect/{metric_id}")
 async def detect_anomalies(
     metric_id: int,
+    send_notifications: bool = Query(True, description="是否发送通知"),
     session: AsyncSession = Depends(get_session),
 ):
     metric_service = MetricService(session)
@@ -86,6 +87,6 @@ async def detect_anomalies(
         raise HTTPException(status_code=404, detail="指标不存在")
     
     detection_service = DetectionService(session)
-    result = await detection_service.detect_anomalies(metric_id)
+    result = await detection_service.detect_anomalies(metric_id, send_notifications=send_notifications)
     
     return result

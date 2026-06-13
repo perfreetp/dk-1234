@@ -17,13 +17,11 @@ async def detect_all_metrics():
         metrics = list(result.scalars().all())
         
         detection_service = DetectionService(session)
-        notification_service = NotificationService(session)
         
         for metric in metrics:
             try:
-                alerts = await detection_service.detect_anomalies(metric.id)
-                for alert in alerts:
-                    await notification_service.notify_alert(alert)
+                result = await detection_service.detect_anomalies(metric.id, send_notifications=True)
+                print(f"检测指标 {metric.code}: 新告警 {result.get('new_alerts_count', 0)}, 恢复 {result.get('restored_alerts_count', 0)}, 通知发送 {result.get('notifications_sent_count', 0)}")
             except Exception as e:
                 print(f"检测指标 {metric.code} 时出错: {e}")
 
